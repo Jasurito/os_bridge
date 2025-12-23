@@ -154,7 +154,7 @@ static char *read_all_response(int fd, size_t *out_len) {
 }
 
 /* Header iterator callback */
-static int collect_headers(void *cls, enum MHD_ValueKind kind,
+static enum MHD_Result collect_headers(void *cls, enum MHD_ValueKind kind,
                           const char *key, const char *value) {
     struct header_collector *hc = cls;
     
@@ -434,3 +434,4 @@ int main(int argc, char **argv) {
 
     MHD_stop_daemon(daemon);
     return 0;
+}
