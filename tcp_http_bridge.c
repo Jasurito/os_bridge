@@ -47,6 +47,31 @@ static char *stristr(const char *haystack, const char *needle) {
     return NULL;
 }
 
+// Add CORS headers to response
+static void add_cors_headers(struct MHD_Response *response) {
+    MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
+    MHD_add_response_header(response, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
+    MHD_add_response_header(response, "Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin");
+    MHD_add_response_header(response, "Access-Control-Max-Age", "86400");
+}
+
+// Handle OPTIONS preflight request
+static enum MHD_Result handle_options(struct MHD_Connection *connection) {
+    const char *empty = "";
+    struct MHD_Response *response = MHD_create_response_from_buffer(
+        0, (void*)empty, MHD_RESPMEM_PERSISTENT);
+    
+    add_cors_headers(response);
+    
+    int ret = MHD_queue_response(connection, MHD_HTTP_NO_CONTENT, response);
+    MHD_destroy_response(response);
+    
+    printf("Handled OPTIONS preflight request\n");
+    fflush(stdout);
+    
+    return ret;
+}
+
 // Connect to backend
 static int connect_backend(const char *host, int port) {
     int sfd = -1;
@@ -62,7 +87,7 @@ static int connect_backend(const char *host, int port) {
     // Setup server address structure
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);  // Convert to network byte order
+    server_addr.sin_port = htons(port);
     
     // Convert IP address from string to binary
     if (inet_pton(AF_INET, host, &server_addr.sin_addr) <= 0) {
@@ -137,6 +162,7 @@ static int collect_headers(void *cls, enum MHD_ValueKind kind,
     if (strcasecmp(key, "Host") == 0) return MHD_YES;
     if (strcasecmp(key, "Connection") == 0) return MHD_YES;
     if (strcasecmp(key, "Content-Length") == 0) return MHD_YES;
+    if (strcasecmp(key, "Origin") == 0) return MHD_YES;
     
     /* Add header to buffer */
     int added = snprintf(hc->buffer + hc->pos, sizeof(hc->buffer) - hc->pos,
@@ -157,6 +183,16 @@ static enum MHD_Result answer_to_connection(void *cls,
                                 const char *upload_data,
                                 size_t *upload_data_size,
                                 void **con_cls) {
+    
+    /* Handle OPTIONS preflight */
+    if (strcmp(method, "OPTIONS") == 0) {
+        if (*con_cls == NULL) {
+            *con_cls = (void*)1; // Mark as processed
+            return handle_options(connection);
+        }
+        return MHD_YES;
+    }
+    
     if (*con_cls == NULL) {
         struct connection_info *ci = calloc(1, sizeof(*ci));
         if (!ci) return MHD_NO;
@@ -239,6 +275,7 @@ static enum MHD_Result answer_to_connection(void *cls,
         const char *err = "Backend connection failed";
         struct MHD_Response *response = MHD_create_response_from_buffer(
             strlen(err), (void*)err, MHD_RESPMEM_PERSISTENT);
+        add_cors_headers(response);
         int ret = MHD_queue_response(connection, MHD_HTTP_BAD_GATEWAY, response);
         MHD_destroy_response(response);
         return ret;
@@ -251,6 +288,7 @@ static enum MHD_Result answer_to_connection(void *cls,
         const char *err = "Failed to send to backend";
         struct MHD_Response *response = MHD_create_response_from_buffer(
             strlen(err), (void*)err, MHD_RESPMEM_PERSISTENT);
+        add_cors_headers(response);
         int ret = MHD_queue_response(connection, MHD_HTTP_BAD_GATEWAY, response);
         MHD_destroy_response(response);
         return ret;
@@ -268,6 +306,7 @@ static enum MHD_Result answer_to_connection(void *cls,
         const char *err = "Empty backend response";
         struct MHD_Response *response = MHD_create_response_from_buffer(
             strlen(err), (void*)err, MHD_RESPMEM_PERSISTENT);
+        add_cors_headers(response);
         int ret = MHD_queue_response(connection, MHD_HTTP_BAD_GATEWAY, response);
         MHD_destroy_response(response);
         return ret;
@@ -329,6 +368,9 @@ static enum MHD_Result answer_to_connection(void *cls,
         body_len, body, MHD_RESPMEM_MUST_FREE);
     MHD_add_response_header(response, "Content-Type", ct_buffer);
     
+    /* Add CORS headers */
+    add_cors_headers(response);
+    
     int ret = MHD_queue_response(connection, status_code, response);
     MHD_destroy_response(response);
     
@@ -343,8 +385,10 @@ static void request_completed(void *cls, struct MHD_Connection *connection,
                              void **con_cls, enum MHD_RequestTerminationCode toe) {
     if (con_cls && *con_cls) {
         struct connection_info *ci = *con_cls;
-        free(ci->post_data);
-        free(ci);
+        if (ci != (void*)1) { // Not an OPTIONS request marker
+            free(ci->post_data);
+            free(ci);
+        }
         *con_cls = NULL;
     }
 }
@@ -383,11 +427,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    printf("HTTP proxy running: :%d -> %s:%d\n", port, g_backend_host, g_backend_port);
+    printf("HTTP proxy with CORS running: :%d -> %s:%d\n", port, g_backend_host, g_backend_port);
     fflush(stdout);
 
     for (;;) pause();
 
     MHD_stop_daemon(daemon);
     return 0;
-}
